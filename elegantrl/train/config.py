@@ -6,6 +6,11 @@ from multiprocessing import Pipe, Process
 
 TEN = th.Tensor
 
+# <<< ADDED IMPORT >>>
+try:
+    from gymnasium import spaces as gymnasium_spaces
+except ImportError:
+    from gym import spaces as gymnasium_spaces # Fallback
 
 class Config:
     def __init__(self, agent_class=None, env_class=None, env_args=None):
@@ -159,9 +164,29 @@ def build_env(env_class=None, env_args: dict = None, gpu_id: int = -1, env_class
         # Instantiate the resolved class (either passed directly or imported dynamically)
         env = resolved_env_class(**kwargs_filter(resolved_env_class.__init__, env_args.copy()))
 
+    # <<< START INSERTION >>>
+    # Update env_args['state_dim'] with the actual dimension from the initialized env instance
+    # This prevents the setattr loop below from overwriting env.state_dim with an incorrect value from args
+    if hasattr(env, 'state_space'):
+        # Prefer state_space if available (custom envs might use this)
+        actual_dim = env.state_space
+        if 'state_dim' not in env_args or env_args['state_dim'] != actual_dim:
+            print(f"[build_env] Correcting env_args['state_dim'] from {env_args.get('state_dim')} to actual env.state_space: {actual_dim}", flush=True)
+            env_args['state_dim'] = actual_dim
+    elif hasattr(env, 'observation_space') and isinstance(env.observation_space, gymnasium_spaces.Box):
+        # Fallback to observation_space shape for standard gym envs
+        actual_dim = env.observation_space.shape[0]
+        if 'state_dim' not in env_args or env_args['state_dim'] != actual_dim:
+            print(f"[build_env] Correcting env_args['state_dim'] from {env_args.get('state_dim')} using env.observation_space.shape[0]: {actual_dim}", flush=True)
+            env_args['state_dim'] = actual_dim
+    else:
+        print(f"[build_env] Warning: Could not determine actual state dimension from env instance. Using value from env_args: {env_args.get('state_dim')}", flush=True)
+    # <<< END INSERTION >>>
+
     env_args.setdefault('num_envs', 1)
     env_args.setdefault('max_step', 12345)
 
+    # Now this loop will use the corrected env_args['state_dim']
     for attr_str in ('env_name', 'num_envs', 'max_step', 'state_dim', 'action_dim', 'if_discrete'):
         setattr(env, attr_str, env_args[attr_str])
     return env

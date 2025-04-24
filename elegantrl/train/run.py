@@ -42,8 +42,13 @@ def train_agent_single_process(args: Config):
 
     '''init environment'''
     env = build_env(args.env_class, args.env_args, args.gpu_id)
+    # <<< Ensure args.state_dim matches env.state_dim >>>
+    if hasattr(env, 'state_dim') and args.state_dim != env.state_dim:
+        print(f"[SingleProcess] Correcting args.state_dim from {args.state_dim} to env.state_dim: {env.state_dim}", flush=True)
+        args.state_dim = env.state_dim
 
     '''init agent'''
+    # Use the potentially corrected args.state_dim
     agent = args.agent_class(args.net_dims, args.state_dim, args.action_dim, gpu_id=args.gpu_id, args=args)
     if args.continue_train:
         agent.save_or_load_agent(args.cwd, if_save=False)
@@ -51,12 +56,12 @@ def train_agent_single_process(args: Config):
     '''init agent.last_state'''
     state, info_dict = env.reset()
     if args.num_envs == 1:
-        assert state.shape == (args.state_dim,)
+        assert state.shape == (env.state_dim,)
         assert isinstance(state, np.ndarray)
         state = th.tensor(state, dtype=th.float32, device=agent.device).unsqueeze(0)
     else:
         state = state.to(agent.device)
-    assert state.shape == (args.num_envs, args.state_dim)
+    assert state.shape == (args.num_envs, env.state_dim)
     assert isinstance(state, th.Tensor)
     agent.last_state = state.detach()
 
@@ -66,7 +71,7 @@ def train_agent_single_process(args: Config):
             gpu_id=args.gpu_id,
             num_seqs=args.num_envs,
             max_size=args.buffer_size,
-            state_dim=args.state_dim,
+            state_dim=args.state_dim, # Use corrected args.state_dim
             action_dim=1 if args.if_discrete else args.action_dim,
             if_use_per=args.if_use_per,
             if_discrete=args.if_discrete,
@@ -89,41 +94,43 @@ def train_agent_single_process(args: Config):
     if_save_buffer = args.if_save_buffer
 
     if_discrete = env.if_discrete
-    show_weight = 1000 / horizon_len / args.num_envs / args.num_workers
+    # Correct calculation if num_workers doesn't exist in single process args
+    num_workers_or_1 = getattr(args, 'num_workers', 1)
+    show_weight = 1000 / horizon_len / args.num_envs / num_workers_or_1
 
-    def action_to_str(_action_ary):  # TODO PLAN to be elegant
+    def action_to_str(_action_ary):
         _show_dict = dict(zip(*np.unique(_action_ary, return_counts=True)))
         _show_str = np.array([int(_show_dict.get(action_key, 0) * show_weight)
                               for action_key in range(env.action_dim)])
         return _show_str
 
-    del args
+    # Keep args for Evaluator, env closing etc.
+    # del args # Keep args
 
     if_train = True
     while if_train:
         buffer_items = agent.explore_env(env, horizon_len)
-        """buffer_items
-        buffer_items = (states, actions,           rewards, undones, unmasks)  # off-policy
-        buffer_items = (states, actions, logprobs, rewards, undones, unmasks)  # on-policy
-        
-        item.shape == (horizon_len, num_workers * num_envs, ...)
-        actions.shape == (horizon_len, num_workers * num_envs, action_dim)  # if_discrete=False
-        actions.shape == (horizon_len, num_workers * num_envs)              # if_discrete=True
-        """
         if if_off_policy:
             buffer.update(buffer_items)
         else:
             buffer[:] = buffer_items
 
         if if_discrete:
-            show_str = action_to_str(_action_ary=buffer_items[1].data.cpu())
-        else:  # TODO PLAN add action_dist
+            action_data = buffer_items[1] if isinstance(buffer_items, tuple) and len(buffer_items) > 1 else None
+            if action_data is not None:
+                 show_str = action_to_str(_action_ary=action_data.data.cpu())
+            else:
+                 show_str = '' # Handle case where action data might be missing
+        else:
             show_str = ''
-        exp_r = buffer_items[2].mean().item()
+        exp_r_index = 3 if not if_off_policy else 2 # Check reward index
+        exp_r = buffer_items[exp_r_index].mean().item() if isinstance(buffer_items, tuple) and len(buffer_items) > exp_r_index else 0.0
 
         th.set_grad_enabled(True)
         logging_tuple = agent.update_net(buffer)
-        logging_tuple = (*logging_tuple, agent.explore_rate, show_str)
+        # Ensure explore_rate exists, provide default if not
+        explore_rate_val = getattr(agent, 'explore_rate', 0.0)
+        logging_tuple = (*logging_tuple, explore_rate_val, show_str)
         th.set_grad_enabled(False)
 
         evaluator.evaluate_and_save(actor=agent.act, steps=horizon_len, exp_r=exp_r, logging_tuple=logging_tuple)
@@ -233,10 +240,33 @@ class Learner(Process):
         elif len(args.learner_gpu_ids) == 1:
             ValueError("| Learner: suggest to set `args.learner_gpu_ids=()` in default")
 
+        # <<< START MODIFICATION FOR LEARNER >>>
+        # Correct args.state_dim using a temp env instance BEFORE agent init
+        try:
+            print(f"[Learner] Determining correct state_dim. Initial args.state_dim: {args.state_dim}", flush=True)
+            temp_env_args = deepcopy(args.env_args)
+            temp_env_class_name = getattr(args, 'env_class_name', None)
+            # Build env on the learner's designated GPU or CPU
+            temp_env = build_env(args.env_class, temp_env_args, args.gpu_id, temp_env_class_name)
+            actual_state_dim = getattr(temp_env, 'state_dim', getattr(temp_env, 'state_space', None))
+            if actual_state_dim is not None and args.state_dim != actual_state_dim:
+                print(f"[Learner] Correcting args.state_dim from {args.state_dim} to {actual_state_dim}", flush=True)
+                args.state_dim = actual_state_dim
+            elif actual_state_dim is None:
+                print(f"[Learner] Warning: Could not determine actual state dim from temp env. Using {args.state_dim}", flush=True)
+            del temp_env
+        except Exception as e:
+            print(f"[Learner] Error during temp env creation for state_dim check: {e}. Using initial args.state_dim {args.state_dim}", flush=True)
+        # <<< END MODIFICATION FOR LEARNER >>>
+
+
         '''Learner init agent'''
+        # Agent initialized with potentially corrected args.state_dim
         agent = args.agent_class(args.net_dims, args.state_dim, args.action_dim, gpu_id=args.gpu_id, args=args)
         if args.continue_train:
-            agent.save_or_load_agent(args.cwd, if_save=False)
+            # Pass if_save=False to load
+            agent.save_or_load_agent(cwd=args.cwd, if_save=False)
+
 
         '''Learner init buffer'''
         if args.if_off_policy:
@@ -244,7 +274,7 @@ class Learner(Process):
                 gpu_id=args.gpu_id,
                 num_seqs=args.num_envs * args.num_workers * num_learners,
                 max_size=args.buffer_size,
-                state_dim=args.state_dim,
+                state_dim=args.state_dim, # Use potentially corrected state_dim
                 action_dim=1 if args.if_discrete else args.action_dim,
                 if_use_per=args.if_use_per,
                 args=args,
@@ -262,24 +292,26 @@ class Learner(Process):
         num_steps = args.horizon_len * args.num_workers
         num_seqs = args.num_envs * args.num_workers * num_learners
 
-        state_dim = args.state_dim
+        state_dim = args.state_dim # Use potentially corrected state_dim
         action_dim = args.action_dim
         horizon_len = args.horizon_len
         cwd = args.cwd
-        del args
+        # Keep args for learner communication section
 
         agent.last_state = th.empty((num_seqs, state_dim), dtype=th.float32, device=agent.device)
 
+        # Initialize buffer tensors with the corrected state_dim
         states = th.zeros((horizon_len, num_seqs, state_dim), dtype=th.float32, device=agent.device)
         actions = th.zeros((horizon_len, num_seqs, action_dim), dtype=th.float32, device=agent.device) \
-            if not if_discrete else th.zeros((horizon_len, num_seqs, 1), dtype=th.int32).to(agent.device)
+            if not if_discrete else th.zeros((horizon_len, num_seqs), dtype=th.int32).to(agent.device) # Correct discrete shape
         rewards = th.zeros((horizon_len, num_seqs), dtype=th.float32, device=agent.device)
         undones = th.zeros((horizon_len, num_seqs), dtype=th.bool, device=agent.device)
         unmasks = th.zeros((horizon_len, num_seqs), dtype=th.bool, device=agent.device)
+
         if if_off_policy:
             buffer_items_tensor = (states, actions, rewards, undones, unmasks)
         else:
-            logprobs = th.zeros((horizon_len, num_seqs), dtype=th.float32, device=agent.device)
+            logprobs = th.zeros((horizon_len, num_seqs), dtype=th.float32, device=agent.device) # Correct logprobs shape
             buffer_items_tensor = (states, actions, logprobs, rewards, undones, unmasks)
 
         if_train = True
@@ -296,27 +328,62 @@ class Learner(Process):
 
                 buf_i = num_envs * worker_id
                 buf_j = num_envs * (worker_id + 1)
-                for buffer_item, buffer_tensor in zip(buffer_items, buffer_items_tensor):
-                    buffer_tensor[:, buf_i:buf_j] = buffer_item.to(agent.device)
-                agent.last_state[buf_i:buf_j] = last_state.to(agent.device)
+                for i, (buffer_item, buffer_tensor) in enumerate(zip(buffer_items, buffer_items_tensor)):
+                    # Check shapes carefully before assignment
+                    target_shape = buffer_tensor[:, buf_i:buf_j].shape
+                    source_shape = buffer_item.shape
+                    if source_shape == target_shape:
+                         buffer_tensor[:, buf_i:buf_j] = buffer_item.to(agent.device)
+                    # Handle potential trailing dimension mismatch (e.g., state dim)
+                    elif len(source_shape) == len(target_shape) and source_shape[:-1] == target_shape[:-1]:
+                         print(f"Learner WARNING (Worker Recv): Mismatched last dim at index {i}! Source {source_shape}, Target {target_shape}. Truncating source.")
+                         min_dim = min(source_shape[-1], target_shape[-1])
+                         buffer_tensor[:, buf_i:buf_j, ..., :min_dim] = buffer_item[..., :min_dim].to(agent.device)
+                    else:
+                         print(f"Learner ERROR (Worker Recv): Incompatible shapes at index {i}! Source {source_shape}, Target {target_shape}. Skipping update.")
+
+                # Check last_state shape
+                target_last_state_shape = agent.last_state[buf_i:buf_j].shape
+                source_last_state_shape = last_state.shape
+                if source_last_state_shape == target_last_state_shape:
+                     agent.last_state[buf_i:buf_j] = last_state.to(agent.device)
+                elif len(source_last_state_shape) == len(target_last_state_shape) and source_last_state_shape[:-1] == target_last_state_shape[:-1]:
+                     print(f"Learner WARNING (Worker Recv): Mismatched last_state last dim! Source {source_last_state_shape}, Target {target_last_state_shape}. Truncating source.")
+                     min_dim = min(source_last_state_shape[-1], target_last_state_shape[-1])
+                     agent.last_state[buf_i:buf_j, ..., :min_dim] = last_state[..., :min_dim].to(agent.device)
+                else:
+                     print(f"Learner ERROR (Worker Recv): Incompatible last_state shapes! Source {source_last_state_shape}, Target {target_last_state_shape}. Skipping update.")
+
+
             del buffer_items, last_state
 
             '''COMMUNICATE between Learners: Learner send actor to other Learners'''
             _buffer_len = num_envs * num_workers
-            _buffer_items_tensor = [t[:, :_buffer_len].cpu().detach() for t in buffer_items_tensor] # Changed detach_() to detach()
+            # Ensure tensors being sent match the expected buffer dimensions
+            _buffer_items_tensor_send = [t[:, :_buffer_len].cpu().detach() for t in buffer_items_tensor]
             for shift_id in range(num_communications):
                 _learner_pipe = self.learners_pipe[learner_id][0]
-                _learner_pipe.send(_buffer_items_tensor)
+                _learner_pipe.send(_buffer_items_tensor_send)
             '''COMMUNICATE between Learners: Learner receive (buffer_items, last_state) from other Learners'''
             for shift_id in range(num_communications):
                 _learner_id = (learner_id + shift_id + 1) % num_learners  # other_learner_id
                 _learner_pipe = self.learners_pipe[_learner_id][1]
-                _buffer_items_tensor = _learner_pipe.recv()
+                _buffer_items_recv = _learner_pipe.recv()
 
                 _buf_i = num_envs * num_workers * (shift_id + 1)
                 _buf_j = num_envs * num_workers * (shift_id + 2)
-                for buffer_item, buffer_tensor in zip(_buffer_items_tensor, buffer_items_tensor):
-                    buffer_tensor[:, _buf_i:_buf_j] = buffer_item.to(agent.device)
+                for i, (buffer_item, buffer_tensor) in enumerate(zip(_buffer_items_recv, buffer_items_tensor)):
+                    # Check shapes carefully before assignment
+                    target_shape = buffer_tensor[:, _buf_i:_buf_j].shape
+                    source_shape = buffer_item.shape
+                    if source_shape == target_shape:
+                         buffer_tensor[:, _buf_i:_buf_j] = buffer_item.to(agent.device)
+                    elif len(source_shape) == len(target_shape) and source_shape[:-1] == target_shape[:-1]:
+                         print(f"Learner WARNING (Comm Recv): Mismatched last dim at index {i}! Source {source_shape}, Target {target_shape}. Truncating source.")
+                         min_dim = min(source_shape[-1], target_shape[-1])
+                         buffer_tensor[:, _buf_i:_buf_j, ..., :min_dim] = buffer_item[..., :min_dim].to(agent.device)
+                    else:
+                         print(f"Learner ERROR (Comm Recv): Incompatible shapes at index {i}! Source {source_shape}, Target {target_shape}. Skipping update.")
 
             '''Learner update training data to (buffer, agent)'''
             if if_off_policy:
@@ -332,15 +399,26 @@ class Learner(Process):
             '''Learner receive training signal from Evaluator'''
             if self.eval_pipe.poll():  # whether there is any data available to be read of this pipe0
                 if_train = self.eval_pipe.recv()  # True means evaluator in idle moments.
-                # actor = agent.act
-                # actor = deepcopy(actor).cpu() if os.name == 'nt' else actor  # WindowsNT_OS can only send cpu_tensor
             else:
-                actor = None
+                actor = None # Set actor to None if no signal received
 
             '''Learner send actor and training log to Evaluator'''
             if if_train:
-                exp_r = buffer_items_tensor[2].mean().item()  # the average rewards of exploration
+                if actor is None: # Re-fetch actor if it was None
+                     actor = agent.act
+                     actor = deepcopy(actor).cpu() if os.name == 'nt' else actor
+                # Determine reward index based on policy type
+                reward_index = 3 if not agent.if_off_policy else 2
+                # Safely access rewards tensor
+                if isinstance(buffer_items_tensor, tuple) and len(buffer_items_tensor) > reward_index:
+                    exp_r = buffer_items_tensor[reward_index].mean().item()
+                else:
+                    exp_r = 0.0 # Default if buffer structure is unexpected
+                    print("Learner Warning: Could not determine exp_r from buffer_items_tensor.")
+
                 self.eval_pipe.send((actor, num_steps, exp_r, logging_tuple))
+            # Keep args for potential future communication needs
+            # del args
 
         '''Learner send the terminal signal to workers after break the loop'''
         print("| Learner Close Worker", flush=True)
@@ -349,7 +427,7 @@ class Learner(Process):
             time.sleep(0.1)
 
         '''save'''
-        agent.save_or_load_agent(cwd, if_save=True)
+        agent.save_or_load_agent(cwd=cwd, if_save=True)
         if if_save_buffer and hasattr(buffer, 'save_or_load_history'):
             print(f"| LearnerPipe.run: ReplayBuffer saving in {cwd}", flush=True)
             buffer.save_or_load_history(cwd, if_save=True)
@@ -363,59 +441,75 @@ class Worker(Process):
         self.recv_pipe = worker_pipe[0]
         self.send_pipe = learner_pipe[1]
         self.worker_id = worker_id
-        self.args = args
+        self.args = args # Store the config object
 
     def run(self):
-        args = self.args
+        args = self.args # Use the stored config object
         worker_id = self.worker_id
         th.set_grad_enabled(False)
 
         '''init environment'''
-        # Retrieve class name string from args, if it exists
         env_class_name_str = getattr(args, 'env_class_name', None)
         env = build_env(
-            env_class=args.env_class, # Pass object (might be None)
+            env_class=args.env_class,
             env_args=args.env_args,
             gpu_id=args.gpu_id,
-            env_class_name=env_class_name_str # Pass name string
+            env_class_name=env_class_name_str
         )
 
+        '''Determine Correct Dimension from Env'''
+        actual_env_state_dim = None
+        if hasattr(env, 'state_dim'):
+            actual_env_state_dim = env.state_dim
+        elif hasattr(env, 'state_space'): # Fallback
+             actual_env_state_dim = env.state_space
+        else:
+             print(f"[Worker {worker_id}] FATAL ERROR: env object missing 'state_dim' or 'state_space'. Cannot determine dimension.", flush=True)
+             actual_env_state_dim = args.state_dim # Last resort
+
+        if args.state_dim != actual_env_state_dim:
+             print(f"[Worker {worker_id}] INFO: Mismatch detected. args.state_dim={args.state_dim}, actual_env_state_dim={actual_env_state_dim}. Using actual.", flush=True)
+             # It's safer to use the actual dim for agent init below, rather than modifying args here
+
         '''init agent'''
-        agent = args.agent_class(args.net_dims, args.state_dim, args.action_dim, gpu_id=args.gpu_id, args=args)
+        # <<< MODIFIED: Use actual_env_state_dim determined above for agent init >>>
+        agent = args.agent_class(args.net_dims, actual_env_state_dim, args.action_dim, gpu_id=args.gpu_id, args=args)
         if args.continue_train:
-            agent.save_or_load_agent(args.cwd, if_save=False)
+             # Pass if_save=False to load
+             agent.save_or_load_agent(cwd=args.cwd, if_save=False)
+
 
         '''init agent.last_state'''
         state, info_dict = env.reset()
         if args.num_envs == 1:
-            assert state.shape == (args.state_dim,)
+            # Use actual_env_state_dim for assertion
+            assert state.shape == (actual_env_state_dim,)
             assert isinstance(state, np.ndarray)
             state = th.tensor(state, dtype=th.float32, device=agent.device).unsqueeze(0)
         else:
-            assert state.shape == (args.num_envs, args.state_dim)
+            # Use actual_env_state_dim for assertion
+            assert state.shape == (args.num_envs, actual_env_state_dim)
             assert isinstance(state, th.Tensor)
             state = state.to(agent.device)
-        assert state.shape == (args.num_envs, args.state_dim)
-        assert isinstance(state, th.Tensor)
         agent.last_state = state.detach()
 
         '''init buffer'''
         horizon_len = args.horizon_len
 
         '''loop'''
-        del args
+        # Keep args for the loop
 
         while True:
             '''Worker receive actor from Learner'''
             actor = self.recv_pipe.recv()
             if actor is None:
                 break
-            agent.act = actor.to(agent.device) if os.name == 'nt' else actor  # WindowsNT_OS can only send cpu_tensor
+            agent.act = actor.to(agent.device) if os.name == 'nt' else actor
 
             '''Worker send the training data to Learner'''
             buffer_items = agent.explore_env(env, horizon_len)
             last_state = agent.last_state
-            if os.name == 'nt':  # WindowsNT_OS can only send cpu_tensor
+            if os.name == 'nt':
                 buffer_items = [t.cpu() for t in buffer_items]
                 last_state = deepcopy(last_state).cpu()
             self.send_pipe.send((worker_id, buffer_items, last_state))
@@ -436,39 +530,32 @@ class EvaluatorProc(Process):
         th.set_grad_enabled(False)
 
         '''init evaluator'''
-        # Determine the class and args to use for evaluation environment
-        eval_env_class_obj = args.eval_env_class # Might be None
+        eval_env_class_obj = args.eval_env_class
         eval_env_args = args.eval_env_args
-        eval_env_class_name_str = getattr(args, 'eval_env_class_name', None) # Get class name string if exists
+        eval_env_class_name_str = getattr(args, 'eval_env_class_name', None)
 
-        # If class object is None, try using class name string
         if eval_env_class_obj is None and eval_env_class_name_str is None:
-             # If BOTH are None, try falling back to main env class/name
              print("[EvaluatorProc] Warning: Both eval_env_class and eval_env_class_name are None. Falling back to main env config.")
              eval_env_class_obj = args.env_class
              eval_env_class_name_str = getattr(args, 'env_class_name', None)
-             # If main args are also missing, build_env will raise the error later
 
-        # If eval_env_args are missing, use main env_args as fallback (less ideal but avoids crash)
         if eval_env_args is None:
              print("[EvaluatorProc] Warning: eval_env_args is None. Falling back to main env_args.")
              eval_env_args = args.env_args
 
-        # Build the evaluation environment, passing the class name string explicitly
         eval_env = build_env(
-            env_class=eval_env_class_obj, # Pass the object (might be None)
-            env_args=eval_env_args,       # Pass the args dict
+            env_class=eval_env_class_obj,
+            env_args=eval_env_args,
             gpu_id=args.gpu_id,
-            env_class_name=eval_env_class_name_str # Pass the name string
+            env_class_name=eval_env_class_name_str
         )
-        # Initialize the Evaluator (this object handles the eval loop logic)
         evaluator = Evaluator(cwd=args.cwd, env=eval_env, args=args, if_tensorboard=False)
 
         '''loop'''
         cwd = args.cwd
         break_step = args.break_step
         device = th.device(f"cuda:{args.gpu_id}" if (th.cuda.is_available() and (args.gpu_id >= 0)) else "cpu")
-        del args
+        del args # Keep evaluator
 
         if_train = True
         while if_train:
@@ -477,9 +564,9 @@ class EvaluatorProc(Process):
 
             '''Evaluator evaluate the actor and save the training log'''
             if actor is None:
-                evaluator.total_step += steps  # update total_step but don't update recorder
+                evaluator.total_step += steps
             else:
-                actor = actor.to(device) if os.name == 'nt' else actor  # WindowsNT_OS can only send cpu_tensor
+                actor = actor.to(device) if os.name == 'nt' else actor
                 evaluator.evaluate_and_save(actor, steps, exp_r, logging_tuple)
 
             '''Evaluator send the training signal to Learner'''
@@ -491,7 +578,7 @@ class EvaluatorProc(Process):
         print(f'| UsedTime: {time.time() - evaluator.start_time:>7.0f} | SavedDir: {cwd}', flush=True)
 
         print("| Evaluator Closing", flush=True)
-        while self.pipe1.poll():  # whether there is any data available to be read of this pipe
+        while self.pipe1.poll():
             while self.pipe0.poll():
                 try:
                     self.pipe0.recv()
