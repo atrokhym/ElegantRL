@@ -371,7 +371,14 @@ class Worker(Process):
         th.set_grad_enabled(False)
 
         '''init environment'''
-        env = build_env(args.env_class, args.env_args, args.gpu_id)
+        # Retrieve class name string from args, if it exists
+        env_class_name_str = getattr(args, 'env_class_name', None)
+        env = build_env(
+            env_class=args.env_class, # Pass object (might be None)
+            env_args=args.env_args,
+            gpu_id=args.gpu_id,
+            env_class_name=env_class_name_str # Pass name string
+        )
 
         '''init agent'''
         agent = args.agent_class(args.net_dims, args.state_dim, args.action_dim, gpu_id=args.gpu_id, args=args)
@@ -429,9 +436,32 @@ class EvaluatorProc(Process):
         th.set_grad_enabled(False)
 
         '''init evaluator'''
-        eval_env_class = args.eval_env_class if args.eval_env_class else args.env_class
-        eval_env_args = args.eval_env_args if args.eval_env_args else args.env_args
-        eval_env = build_env(eval_env_class, eval_env_args, args.gpu_id)
+        # Determine the class and args to use for evaluation environment
+        eval_env_class_obj = args.eval_env_class # Might be None
+        eval_env_args = args.eval_env_args
+        eval_env_class_name_str = getattr(args, 'eval_env_class_name', None) # Get class name string if exists
+
+        # If class object is None, try using class name string
+        if eval_env_class_obj is None and eval_env_class_name_str is None:
+             # If BOTH are None, try falling back to main env class/name
+             print("[EvaluatorProc] Warning: Both eval_env_class and eval_env_class_name are None. Falling back to main env config.")
+             eval_env_class_obj = args.env_class
+             eval_env_class_name_str = getattr(args, 'env_class_name', None)
+             # If main args are also missing, build_env will raise the error later
+
+        # If eval_env_args are missing, use main env_args as fallback (less ideal but avoids crash)
+        if eval_env_args is None:
+             print("[EvaluatorProc] Warning: eval_env_args is None. Falling back to main env_args.")
+             eval_env_args = args.env_args
+
+        # Build the evaluation environment, passing the class name string explicitly
+        eval_env = build_env(
+            env_class=eval_env_class_obj, # Pass the object (might be None)
+            env_args=eval_env_args,       # Pass the args dict
+            gpu_id=args.gpu_id,
+            env_class_name=eval_env_class_name_str # Pass the name string
+        )
+        # Initialize the Evaluator (this object handles the eval loop logic)
         evaluator = Evaluator(cwd=args.cwd, env=eval_env, args=args, if_tensorboard=False)
 
         '''loop'''

@@ -115,18 +115,49 @@ class Config:
         print(pprint(vars(self)), flush=True)  # prints out args in a neat, readable format
 
 
-def build_env(env_class=None, env_args: dict = None, gpu_id: int = -1):
+def build_env(env_class=None, env_args: dict = None, gpu_id: int = -1, env_class_name: str = None):
+    """
+    Build environment from env_class (object) or env_class_name (string) and env_args.
+    Dynamically imports the class if env_class_name is provided.
+    """
     import warnings
+    import importlib # Import necessary module
+
     warnings.filterwarnings("ignore", message=".*get variables from other wrappers is deprecated.*")
+
+    resolved_env_class = env_class # Start with the provided class object
+
+    # --- Dynamic Import Logic ---
+    if resolved_env_class is None and env_class_name:
+        try:
+            module_path, class_name = env_class_name.rsplit('.', 1)
+            print(f"[build_env] Dynamically importing class '{class_name}' from module '{module_path}'...")
+            module = importlib.import_module(module_path)
+            resolved_env_class = getattr(module, class_name)
+            print(f"[build_env] Successfully imported: {resolved_env_class}")
+        except (ImportError, AttributeError, ValueError) as e:
+            print(f"[build_env] ERROR: Failed to dynamically import '{env_class_name}': {e}")
+            # Fallback or raise error? Raising might be safer.
+            raise ImportError(f"Could not import environment class '{env_class_name}'.") from e
+    elif resolved_env_class is None and not env_class_name:
+         # Handle case where both are None - maybe default to gym.make? Or raise error?
+         raise ValueError("[build_env] Both env_class and env_class_name are None. Cannot build environment.")
+    # --- End Dynamic Import ---
+
+
     env_args['gpu_id'] = gpu_id  # set gpu_id for vectorized env before build it
 
+    # Use the resolved_env_class for instantiation
     if env_args.get('if_build_vec_env'):
         num_envs = env_args['num_envs']
-        env = VecEnv(env_class=env_class, env_args=env_args, num_envs=num_envs, gpu_id=gpu_id)
-    elif env_class.__module__ == 'gymnasium.envs.registration':
-        env = env_class(id=env_args['env_name'])
+        # Pass the resolved class to VecEnv
+        env = VecEnv(env_class=resolved_env_class, env_args=env_args, num_envs=num_envs, gpu_id=gpu_id)
+    elif resolved_env_class.__module__ == 'gymnasium.envs.registration':
+        # Handles cases like gym.make passed directly or resolved dynamically (unlikely but possible)
+        env = resolved_env_class(id=env_args['env_name'])
     else:
-        env = env_class(**kwargs_filter(env_class.__init__, env_args.copy()))
+        # Instantiate the resolved class (either passed directly or imported dynamically)
+        env = resolved_env_class(**kwargs_filter(resolved_env_class.__init__, env_args.copy()))
 
     env_args.setdefault('num_envs', 1)
     env_args.setdefault('max_step', 12345)
