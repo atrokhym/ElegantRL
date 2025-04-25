@@ -84,7 +84,7 @@ def train_agent_single_process(args: Config):
     eval_env_class = args.eval_env_class if args.eval_env_class else args.env_class
     eval_env_args = args.eval_env_args if args.eval_env_args else args.env_args
     eval_env = build_env(eval_env_class, eval_env_args, args.gpu_id)
-    evaluator = Evaluator(cwd=args.cwd, env=eval_env, args=args, if_tensorboard=False)
+    evaluator = Evaluator(cwd=args.cwd, env=eval_env, args=args, if_tensorboard=True) # MODIFIED
 
     '''train loop'''
     cwd = args.cwd
@@ -549,7 +549,7 @@ class EvaluatorProc(Process):
             gpu_id=args.gpu_id,
             env_class_name=eval_env_class_name_str
         )
-        evaluator = Evaluator(cwd=args.cwd, env=eval_env, args=args, if_tensorboard=False)
+        evaluator = Evaluator(cwd=args.cwd, env=eval_env, args=args, if_tensorboard=True) # MODIFIED
 
         '''loop'''
         cwd = args.cwd
@@ -623,3 +623,747 @@ def render_agent(env_class, env_args: dict, net_dims: [int], agent_class, actor_
     for i in range(render_times):
         cumulative_reward, episode_step = get_rewards_and_steps(env, actor, if_render=True)
         print(f"|{i:4}  cumulative_reward {cumulative_reward:9.3f}  episode_step {episode_step:5.0f}", flush=True)
+
+
+# Keep demo/run functions as they were, assuming they are not the source of the main error
+# Add imports needed by these functions if not already present globally
+import sys
+import gym
+
+# Note: The following imports depend on the ElegantRL structure and might need adjustment
+try:
+    from elegantrl.agents.AgentPPO import AgentPPO  # Example agent
+    from elegantrl.train.config import Config, build_env
+    from elegantrl.envs.CustomGymEnv import PendulumEnv  # Example custom env
+except ImportError as e:
+    print(
+        f"| WARNING: Could not import ElegantRL components for demo functions: {e}",
+        flush=True,
+    )
+
+    # Define dummy classes/functions if needed for the script to not crash immediately
+    class AgentPPO:
+        pass
+
+    class Config:
+        pass
+
+    def build_env(env_class, env_args):
+        return None
+
+    class PendulumEnv:
+        pass
+
+
+def demo_evaluator_actor_pth():
+    print("| Running demo_evaluator_actor_pth...", flush=True)
+    gpu_id = -1  # Use CPU for demo
+
+    # Check if AgentPPO was imported
+    if "AgentPPO" not in globals() or AgentPPO is None:
+        print(
+            "| demo_evaluator_actor_pth: AgentPPO not available. Skipping.", flush=True
+        )
+        return -np.inf, 0
+
+    agent_class = AgentPPO
+
+    try:
+        env_class = gym.make
+        env_args = {"id": "LunarLanderContinuous-v2"}  # Use 'id' for gym.make
+        # Create a dummy env to get dims if build_env fails
+        try:
+            _dummy_env = env_class(env_args["id"])
+            state_dim = _dummy_env.observation_space.shape[0]
+            action_dim = _dummy_env.action_space.shape[0]
+            max_step = getattr(_dummy_env, "_max_episode_steps", 1000)
+            _dummy_env.close()
+        except Exception:
+            print(
+                "| demo_evaluator_actor_pth: Could not create dummy env for dims. Using defaults.",
+                flush=True,
+            )
+            state_dim = 8
+            action_dim = 2
+            max_step = 1000
+
+        full_env_args = {
+            "num_envs": 1,
+            "env_name": "LunarLanderContinuous-v2",
+            "max_step": max_step,
+            "state_dim": state_dim,
+            "action_dim": action_dim,
+            "if_discrete": False,
+            "target_return": 200,
+            "id": "LunarLanderContinuous-v2",
+        }
+    except Exception as e:
+        print(
+            f"| demo_evaluator_actor_pth: Error setting up env args: {e}. Skipping.",
+            flush=True,
+        )
+        return -np.inf, 0
+
+    eval_times = 4
+    net_dim = 2**7  # Example network dimension
+
+    """init"""
+    # Check if Config and build_env were imported
+    if (
+        "Config" not in globals()
+        or "build_env" not in globals()
+        or Config is None
+        or build_env is None
+    ):
+        print(
+            "| demo_evaluator_actor_pth: Config or build_env not available. Skipping.",
+            flush=True,
+        )
+        return -np.inf, 0
+
+    try:
+        args = Config(
+            agent_class=agent_class, env_class=env_class, env_args=full_env_args
+        )
+        # Pass state/action dim explicitly if build_env needs them
+        args.state_dim = state_dim
+        args.action_dim = action_dim
+        env = build_env(env_class=args.env_class, env_args=args.env_args)
+        if env is None:
+            raise ValueError("build_env returned None")
+        # If build_env doesn't set max_step, set it manually
+        if not hasattr(env, "max_step"):
+            env.max_step = max_step
+
+        act = agent_class(net_dim, state_dim, action_dim, gpu_id=gpu_id, args=args).act
+    except Exception as e:
+        import traceback
+
+        print(
+            f"| demo_evaluator_actor_pth: Error initializing agent/env: {e}", flush=True
+        )
+        print(traceback.format_exc(), flush=True)
+        if "env" in locals() and hasattr(env, "close"):
+            env.close()
+        return -np.inf, 0
+
+    # actor_path = './LunarLanderContinuous-v2_PPO_0/actor.pt' # Example path
+    # if os.path.exists(actor_path):
+    #     print(f"| Loading actor from: {actor_path}", flush=True)
+    #     try:
+    #         act.load_state_dict(th.load(actor_path, map_location=lambda storage, loc: storage))
+    #     except Exception as e:
+    #          print(f"| Failed to load actor: {e}", flush=True)
+    # else:
+    #      print(f"| Actor path not found: {actor_path}. Using untrained actor.", flush=True)
+
+    """evaluate"""
+    r_s_list = []
+    print(f"| Evaluating {eval_times} times...", flush=True)
+    for i in range(eval_times):
+        result = get_rewards_and_steps(env, act)
+        if result is not None:
+            r_s_list.append(result)
+            print(
+                f"| Eval {i+1}/{eval_times}: Reward={result[0]:.2f}, Steps={result[1]}",
+                flush=True,
+            )
+        else:
+            print(f"| Eval {i+1}/{eval_times}: Failed.", flush=True)
+
+    # Close env
+    if hasattr(env, "close"):
+        env.close()
+
+    if not r_s_list:
+        print(
+            "| demo_evaluator_actor_pth: No valid evaluation results obtained.",
+            flush=True,
+        )
+        return -np.inf, 0
+
+    r_s_ary = np.array(r_s_list, dtype=np.float32)
+    r_avg, s_avg = r_s_ary.mean(axis=0)  # average of episode return and episode step
+
+    print(f"| Final Avg Reward: {r_avg:.2f}, Avg Steps: {s_avg:.1f}", flush=True)
+    return r_avg, s_avg
+
+
+def demo_evaluate_actors(
+    dir_path: str, gpu_id: int, agent, env_args: dict, eval_times=2, net_dim=128
+):
+    print(f"\n| Running demo_evaluate_actors in directory: {dir_path}", flush=True)
+    # Check if AgentPPO was imported
+    if "AgentPPO" not in globals() or AgentPPO is None:
+        print(
+            "| demo_evaluate_actors: Agent class not available. Skipping.", flush=True
+        )
+        return np.empty((0, 3))
+
+    # Setup Env
+    try:
+        env_class = gym.make
+        # Ensure essential args are present
+        env_id = env_args.get("id", env_args.get("env_name"))
+        if not env_id:
+            raise ValueError("Missing env id/name in env_args")
+
+        # Create dummy env for dims
+        try:
+            _dummy_env = env_class(env_id)
+            state_dim = _dummy_env.observation_space.shape[0]
+            action_dim = (
+                _dummy_env.action_space.shape[0]
+                if isinstance(_dummy_env.action_space, gym.spaces.Box)
+                else _dummy_env.action_space.n
+            )
+            max_step = getattr(_dummy_env, "_max_episode_steps", 1000)
+            _dummy_env.close()
+        except Exception as e:
+            print(
+                f"| demo_evaluate_actors: Could not create dummy env '{env_id}' for dims: {e}. Using defaults.",
+                flush=True,
+            )
+            state_dim = env_args.get("state_dim", None)
+            action_dim = env_args.get("action_dim", None)
+            max_step = env_args.get("max_step", 1000)
+            if state_dim is None or action_dim is None:
+                print(
+                    "| demo_evaluate_actors: Missing state_dim or action_dim. Cannot proceed.",
+                    flush=True,
+                )
+                return np.empty((0, 3))
+
+        full_env_args = env_args.copy()
+        full_env_args.update(
+            {
+                "state_dim": state_dim,
+                "action_dim": action_dim,
+                "max_step": max_step,
+                "id": env_id,  # Ensure id is present
+            }
+        )
+
+        if (
+            "Config" not in globals()
+            or "build_env" not in globals()
+            or Config is None
+            or build_env is None
+        ):
+            print(
+                "| demo_evaluate_actors: Config or build_env not available. Skipping env creation.",
+                flush=True,
+            )
+            return np.empty((0, 3))
+
+        args_obj = Config(
+            agent_class=agent, env_class=env_class, env_args=full_env_args
+        )
+        args_obj.state_dim = state_dim  # Pass dims explicitly
+        args_obj.action_dim = action_dim
+        env = build_env(env_class=env_class, env_args=args_obj.env_args)
+        if env is None:
+            raise ValueError("build_env returned None")
+        if not hasattr(env, "max_step"):
+            env.max_step = max_step  # Set max_step if needed
+
+        # Init Actor (only the structure, weights loaded later)
+        act = agent(net_dim, state_dim, action_dim, gpu_id=gpu_id, args=args_obj).act
+
+    except Exception as e:
+        import traceback
+
+        print(
+            f"| demo_evaluate_actors: Error initializing env/actor structure: {e}",
+            flush=True,
+        )
+        print(traceback.format_exc(), flush=True)
+        if "env" in locals() and hasattr(env, "close"):
+            env.close()
+        return np.empty((0, 3))
+
+    """evaluate saved models"""
+    step_epi_r_s_ary = []
+    try:
+        # Find actor files like actor*.pt
+        actor_files = [
+            name
+            for name in os.listdir(dir_path)
+            if name.startswith("actor")
+            and name.endswith(".pt")
+            and os.path.isfile(os.path.join(dir_path, name))
+        ]
+        actor_files.sort()  # Sort for consistent order
+        print(f"| Found {len(actor_files)} actor files to evaluate.", flush=True)
+
+        for act_name in actor_files:
+            act_path = os.path.join(dir_path, act_name)
+            print(f"|-- Evaluating: {act_name}", end=" ", flush=True)
+            try:
+                # Load state dict
+                map_location = f"cuda:{gpu_id}" if gpu_id >= 0 else "cpu"
+                act.load_state_dict(th.load(act_path, map_location=map_location))
+            except Exception as e:
+                print(f"Failed loading: {e}", flush=True)
+                continue  # Skip this actor
+
+            # Evaluate multiple times
+            r_s_list = []
+            for i in range(eval_times):
+                result = get_rewards_and_steps(env, act)
+                if result is not None:
+                    r_s_list.append(result)
+                # else: # Optional: print failure for each run
+                #      print(f"\n   Eval run {i+1} failed.", flush=True)
+
+            if not r_s_list:
+                print(f"No valid runs.", flush=True)
+                continue  # Skip if all runs failed
+
+            r_s_ary = np.array(r_s_list, dtype=np.float32)
+            r_avg, s_avg = r_s_ary.mean(axis=0)
+            print(
+                f"AvgR={r_avg:.2f}, AvgS={s_avg:.1f} ({len(r_s_list)} valid runs)",
+                flush=True,
+            )
+
+            # Extract step number from filename (e.g., actor__000123456_...pt or actor__000123456.pt)
+            try:
+                parts = act_name[:-3].split("_")  # Remove .pt and split
+                # Find the first long digit sequence, likely the step count
+                step_str = "0"
+                for part in reversed(parts):
+                    if part.isdigit() and len(part) > 5:  # Heuristic for step count
+                        step_str = part
+                        break
+                step = int(step_str)
+            except (ValueError, IndexError):
+                print(f"| Could not parse step from '{act_name}'. Using 0.", flush=True)
+                step = 0
+
+            step_epi_r_s_ary.append((step, r_avg, s_avg))
+
+    except Exception as e:
+        import traceback
+
+        print(
+            f"\n| demo_evaluate_actors: Error during evaluation loop: {e}", flush=True
+        )
+        print(traceback.format_exc(), flush=True)
+
+    finally:
+        # Ensure env is closed
+        if "env" in locals() and hasattr(env, "close"):
+            env.close()
+            print("| Environment closed.", flush=True)
+
+    if not step_epi_r_s_ary:
+        print("| demo_evaluate_actors: No actors evaluated successfully.", flush=True)
+        return np.empty((0, 3))
+
+    step_epi_r_s_ary = np.array(step_epi_r_s_ary, dtype=np.float32)
+    # Sort by step number
+    step_epi_r_s_ary = step_epi_r_s_ary[step_epi_r_s_ary[:, 0].argsort()]
+    return step_epi_r_s_ary
+
+
+def demo_load_pendulum_and_render():
+    print("\n| Running demo_load_pendulum_and_render...", flush=True)
+    gpu_id = -1  # Use CPU for demo
+
+    # Check dependencies
+    if (
+        "AgentPPO" not in globals()
+        or "Config" not in globals()
+        or "build_env" not in globals()
+        or AgentPPO is None
+        or Config is None
+        or build_env is None
+    ):
+        print(
+            "| demo_load_pendulum_and_render: Missing dependencies (AgentPPO, Config, build_env). Skipping.",
+            flush=True,
+        )
+        return
+
+    agent_class = AgentPPO
+    env = None  # Initialize env to None for finally block
+
+    try:
+        # Try custom env first, fallback to gym
+        try:
+            if "PendulumEnv" not in globals() or PendulumEnv is None:
+                raise ImportError
+            env_class = PendulumEnv
+            env_args = {"env_name": "Pendulum-v1", "max_step": 200}
+            print("| Using custom PendulumEnv.", flush=True)
+        except ImportError:
+            print(
+                "| Custom PendulumEnv not found. Using gym.make('Pendulum-v1').",
+                flush=True,
+            )
+            env_class = gym.make
+            env_args = {
+                "id": "Pendulum-v1",
+                "render_mode": "human",
+                "max_episode_steps": 200,
+            }  # Add render_mode
+
+        # Create dummy env for dims
+        try:
+            _dummy_env = env_class(env_args.get("id", "Pendulum-v1"))
+            state_dim = _dummy_env.observation_space.shape[0]
+            action_dim = _dummy_env.action_space.shape[0]
+            max_step = getattr(_dummy_env, "_max_episode_steps", 200)
+            _dummy_env.close()
+        except Exception as e:
+            print(
+                f"| demo_load_pendulum_and_render: Could not create dummy env for dims: {e}. Using defaults.",
+                flush=True,
+            )
+            state_dim = 3
+            action_dim = 1
+            max_step = 200
+
+        full_env_args = env_args.copy()
+        full_env_args.update(
+            {
+                "state_dim": state_dim,
+                "action_dim": action_dim,
+                "max_step": max_step,
+                "id": env_args.get("id", "Pendulum-v1"),  # Ensure id
+            }
+        )
+
+        # Actor Path (adjust if needed)
+        actor_path = "./Pendulum-v1_PPO_0/actor.pt"
+        net_dim = 2**7
+
+        """init"""
+        args = Config(
+            agent_class=agent_class, env_class=env_class, env_args=full_env_args
+        )
+        args.state_dim = state_dim
+        args.action_dim = action_dim
+
+        # Build real env for rendering
+        render_env_args = full_env_args.copy()
+        render_env_args["render_mode"] = "human"  # Ensure render mode for gym.make
+        env = build_env(env_class=env_class, env_args=render_env_args)
+        if env is None:
+            raise ValueError("build_env returned None")
+        if not hasattr(env, "max_step"):
+            env.max_step = max_step
+
+        act = agent_class(net_dim, state_dim, action_dim, gpu_id=gpu_id, args=args).act
+
+        if not os.path.exists(actor_path):
+            print(
+                f"| Actor path not found: {actor_path}. Skipping evaluation and render.",
+                flush=True,
+            )
+            return
+
+        print(f"| Loading actor from: {actor_path}", flush=True)
+        act.load_state_dict(
+            th.load(actor_path, map_location=lambda storage, loc: storage)
+        )
+        act.eval()  # Set to evaluation mode
+
+        """render"""
+        max_render_steps = getattr(env, "max_step", max_step)
+        device = next(act.parameters()).device
+
+        state, info = env.reset()
+        steps_count = 0
+        returns = 0.0
+        terminated = False
+        truncated = False
+        print("| Starting render loop...", flush=True)
+
+        with th.no_grad():
+            for steps_count in range(max_render_steps):
+                if not isinstance(state, np.ndarray) or state.dtype != np.float32:
+                    state = np.array(state, dtype=np.float32)
+                s_tensor = th.as_tensor(
+                    state, dtype=th.float32, device=device
+                ).unsqueeze(0)
+                a_tensor = act(s_tensor)
+                # Pendulum action space requires scaling (typically * max_torque, which is 2)
+                action = a_tensor.detach().cpu().numpy()[0] * 2.0
+
+                step_output = env.step(action)
+                if len(step_output) == 5:
+                    state, reward, terminated, truncated, info = step_output
+                elif len(step_output) == 4:
+                    state, reward, terminated, info = step_output
+                    truncated = False  # Older gym
+                else:
+                    raise ValueError("Unexpected step output length")
+
+                returns += reward
+                env.render()  # Call render
+
+                if terminated or truncated:
+                    break
+            else:
+                print(
+                    f"| Render loop reached max_steps: {max_render_steps}", flush=True
+                )
+
+        final_returns = info.get("episode", {}).get(
+            "r", returns
+        )  # Get final return from info if available
+        final_steps = info.get("episode", {}).get("l", steps_count + 1)
+
+        print(f"\n| Render finished.", flush=True)
+        print(f"| Final Cumulative Return: {final_returns:.3f}", flush=True)
+        print(f"| Episode Steps: {final_steps}", flush=True)
+
+    except Exception as e:
+        import traceback
+
+        print(f"\n| demo_load_pendulum_and_render: ERROR: {e}", flush=True)
+        print(traceback.format_exc(), flush=True)
+
+    finally:
+        if env is not None and hasattr(env, "close"):
+            env.close()
+            print("| Environment closed.", flush=True)
+
+
+def run():
+    print("\n| Running combined evaluation and plotting (run function)...", flush=True)
+    # --- Configuration ---
+    flag_id = (
+        0  # Selects which env_args to use (0 for LunarLander, 1 for BipedalWalker)
+    )
+    default_gpu_id = -1  # Default to CPU if selection fails
+    default_net_dim = 256  # Default network dim for loading actors
+
+    # Check dependencies
+    if "AgentPPO" not in globals() or AgentPPO is None:
+        print("| run: AgentPPO class not available. Exiting.", flush=True)
+        return
+    agent_class = AgentPPO
+
+    # --- Environment Setup ---
+    env_args_list = [
+        # LunarLanderContinuous-v2
+        {
+            "id": "LunarLanderContinuous-v2",
+            "env_name": "LunarLanderContinuous-v2",
+            "num_envs": 1,
+            "target_return": 200,
+            "eval_times": 16,
+        },
+        # BipedalWalker-v3
+        {
+            "id": "BipedalWalker-v3",
+            "env_name": "BipedalWalker-v3",
+            "num_envs": 1,
+            "target_return": 300,
+            "eval_times": 8,
+        },
+    ]
+    try:
+        selected_env_args = env_args_list[flag_id]
+        env_name = selected_env_args["env_name"]
+    except IndexError:
+        print(
+            f"| run: Error! flag_id {flag_id} is out of range for env_args list. Exiting.",
+            flush=True,
+        )
+        return
+
+    # --- GPU Setup ---
+    gpu_list = [-1, 0, 1, 2, 3]  # Example list of available GPUs/CPU
+    try:
+        gpu_id = gpu_list[flag_id + 1]  # Offset example, adjust as needed
+    except IndexError:
+        print(
+            f"| run: Warning! flag_id {flag_id} leads to out of range GPU selection. Using default GPU {default_gpu_id}.",
+            flush=True,
+        )
+        gpu_id = default_gpu_id
+
+    print("| Run Settings:", flush=True)
+    print(f"| Environment: {env_name}", flush=True)
+    print(f"| Agent Class: {agent_class.__name__}", flush=True)
+    print(f"| GPU ID: {gpu_id}", flush=True)
+    print(f'| Eval Times per Actor: {selected_env_args["eval_times"]}', flush=True)
+    print(f"| Net Dim: {default_net_dim}", flush=True)
+
+    # --- Evaluate Saved Models ---
+    all_results = []
+    cwd_path = "."
+    # Find directories matching env_name convention (e.g., LunarLanderContinuous-v2_PPO_*)
+    potential_dirs = [
+        name
+        for name in os.listdir(cwd_path)
+        if env_name in name and os.path.isdir(os.path.join(cwd_path, name))
+    ]
+    print(
+        f"\n| Found {len(potential_dirs)} potential model directories: {potential_dirs}",
+        flush=True,
+    )
+
+    for dir_name in potential_dirs:
+        dir_path = os.path.join(cwd_path, dir_name)
+        # Run evaluation for this directory
+        results_ary = demo_evaluate_actors(
+            dir_path,
+            gpu_id,
+            agent_class,
+            selected_env_args,
+            eval_times=selected_env_args["eval_times"],
+            net_dim=default_net_dim,
+        )
+
+        if results_ary is not None and results_ary.shape[0] > 0:
+            all_results.append(results_ary)
+            # Optionally save results per directory
+            # save_path = f"{dir_path}-step_epi_r_s_ary.txt"
+            # np.savetxt(save_path, results_ary, fmt='%.4f')
+            # print(f"| Saved results for {dir_name} to {save_path}", flush=True)
+        else:
+            print(f"| No results generated for directory: {dir_name}", flush=True)
+
+    # --- Process and Plot Combined Results ---
+    if not all_results:
+        print(
+            "\n| No evaluation results found across all directories. Cannot plot.",
+            flush=True,
+        )
+        return
+
+    # Combine results and sort by step
+    combined_results = np.vstack(all_results)
+    combined_results = combined_results[
+        combined_results[:, 0].argsort()
+    ]  # Sort by step (column 0)
+    print(
+        f"\n| Combined evaluation results shape: {combined_results.shape}", flush=True
+    )
+    if combined_results.shape[0] == 0:
+        print("| No combined results to plot after merging.", flush=True)
+        return
+
+    # --- Plotting ---
+    try:
+        print("| Plotting combined results...", flush=True)
+        # Aggregate/smooth data for plotting (e.g., average results within step ranges)
+        plot_data = []
+        unique_steps = np.unique(combined_results[:, 0])
+        # Define step bins for aggregation (e.g., 20 bins)
+        num_bins = min(50, len(unique_steps))  # Limit number of points on plot
+        if num_bins <= 1:
+            step_bins = unique_steps
+        else:
+            step_bins = np.linspace(
+                unique_steps.min(), unique_steps.max(), num_bins + 1
+            )
+
+        for i in range(len(step_bins) - 1):
+            low_step, high_step = step_bins[i], step_bins[i + 1]
+            # Include points exactly at high_step in the current bin, except for the last bin
+            mask = (combined_results[:, 0] >= low_step) & (
+                combined_results[:, 0] < high_step
+            )
+            if i == len(step_bins) - 2:  # Include max step in last bin
+                mask |= combined_results[:, 0] == high_step
+
+            if not np.any(mask):
+                continue
+
+            bin_data = combined_results[mask]
+            avg_step = bin_data[:, 0].mean()
+            avg_reward = bin_data[:, 1].mean()
+            std_reward = bin_data[:, 1].std()
+            avg_ep_steps = bin_data[:, 2].mean()  # Average episode length in bin
+
+            plot_data.append((avg_step, avg_reward, std_reward, avg_ep_steps))
+
+        if not plot_data:
+            print("| No data points after aggregation for plotting.", flush=True)
+            return
+
+        plot_data = np.array(plot_data)
+        plot_steps = plot_data[:, 0]
+        plot_rewards = plot_data[:, 1]
+        plot_rewards_std = plot_data[:, 2]
+        plot_ep_steps = plot_data[:, 3]
+
+        # Create Plot
+        import matplotlib.pyplot as plt
+
+        fig, ax = plt.subplots(1, figsize=(12, 6))
+        color_reward = "royalblue"
+        color_steps = "lightcoral"
+        plot_title = f"{env_name}_{agent_class.__name__}_Combined_Learning_Curve"
+
+        # Plot Avg Reward + Std Dev Band
+        ax.plot(
+            plot_steps,
+            plot_rewards,
+            label="Avg Episode Return (Smoothed)",
+            color=color_reward,
+            marker="o",
+            markersize=4,
+            linestyle="-",
+        )
+        ax.fill_between(
+            plot_steps,
+            plot_rewards - plot_rewards_std,
+            plot_rewards + plot_rewards_std,
+            facecolor=color_reward,
+            alpha=0.2,
+            label="Std Dev Band",
+        )
+        ax.set_ylabel("Episode Return", color=color_reward)
+        ax.tick_params(axis="y", labelcolor=color_reward)
+        ax.grid(True, linestyle="--", alpha=0.6)
+        ax.set_xlabel("Total Training Steps")
+        ax.legend(loc="upper left")
+
+        # Plot Avg Episode Steps on Twin Axis
+        ax_twin = ax.twinx()
+        ax_twin.plot(
+            plot_steps,
+            plot_ep_steps,
+            label="Avg Episode Steps (Smoothed)",
+            color=color_steps,
+            marker="x",
+            markersize=4,
+            linestyle=":",
+        )
+        ax_twin.set_ylabel("Episode Steps", color=color_steps)
+        ax_twin.tick_params(axis="y", labelcolor=color_steps)
+        ax_twin.legend(loc="upper right")
+        # ax_twin.set_ylim(bottom=0) # Optional: force step axis start at 0
+
+        plt.title(plot_title)
+        plot_save_path = f"{env_name}_{agent_class.__name__}_combined_curve.png"
+        print(f"| Saving combined plot to: {plot_save_path}", flush=True)
+        plt.savefig(plot_save_path, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+
+    except ImportError:
+        print(
+            "| run: Matplotlib not found. Skipping plotting combined results.",
+            flush=True,
+        )
+    except Exception as e:
+        import traceback
+
+        print(f"| run: Error during combined results plotting: {e}", flush=True)
+        print(traceback.format_exc(), flush=True)
+        if "plt" in locals() and plt.get_fignums():
+            plt.close("all")
+
+
+if __name__ == "__main__":
+    # Select which function to run when the script is executed
+    # demo_evaluator_actor_pth()
+    # demo_load_pendulum_and_render()
+    run()  # Runs the combined evaluation and plotting
