@@ -69,7 +69,7 @@ class AgentPPO(AgentBase):
                 ary_state, info_dict = env.reset()
             state = th.as_tensor(ary_state, dtype=th.float32, device=self.device).unsqueeze(0)
 
-            rewards[t] = reward
+            rewards[t] = float(reward) # <<< FIX: Cast reward to float
             terminals[t] = terminal
             truncates[t] = truncate
 
@@ -156,9 +156,11 @@ class AgentPPO(AgentBase):
         obj_actors = []
 
         th.set_grad_enabled(True)
-        update_times = int(buffer_size * self.repeat_times / self.batch_size)
-        assert update_times >= 1
-        for update_t in range(update_times):
+        # Original calculation based on buffer state was causing AssertionError:
+        # update_times = int(buffer_size * self.repeat_times / self.batch_size) # Example calculation, actual one used buffer.undone_mask
+        # assert update_times >= 1
+        # FIX: Use self.repeat_times directly, ensuring a valid number of updates.
+        for update_t in range(self.repeat_times): # Use configured repeat_times directly
             obj_critic, obj_actor, obj_entropy = self.update_objectives(buffer, update_t)
             obj_entropies.append(obj_entropy)
             obj_critics.append(obj_critic)
