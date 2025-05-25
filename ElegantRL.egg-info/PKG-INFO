@@ -1,4 +1,4 @@
-Metadata-Version: 2.1
+Metadata-Version: 2.4
 Name: ElegantRL
 Version: 0.3.10
 Summary: Lightweight, Efficient and Stable DRL Implementation Using PyTorch
@@ -20,3 +20,17 @@ Classifier: Programming Language :: Python :: Implementation :: CPython
 Classifier: Programming Language :: Python :: Implementation :: PyPy
 Requires-Python: >=3.6
 License-File: LICENSE
+Requires-Dist: th
+Requires-Dist: numpy
+Requires-Dist: gymnasium
+Requires-Dist: matplotlib
+Dynamic: author
+Dynamic: author-email
+Dynamic: classifier
+Dynamic: home-page
+Dynamic: keywords
+Dynamic: license
+Dynamic: license-file
+Dynamic: requires-dist
+Dynamic: requires-python
+Dynamic: summary
