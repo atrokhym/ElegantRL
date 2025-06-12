@@ -68,9 +68,9 @@ class Evaluator:
         returns = rewards_step_ten[:, 0]  # episodic cumulative returns of an
         steps = rewards_step_ten[:, 1]  # episodic step number
         avg_r = returns.mean().item()
-        std_r = returns.std().item()
+        std_r = returns.std().item() if len(returns) > 1 else 0.0
         avg_s = steps.mean().item()
-        std_s = steps.std().item()
+        std_s = steps.std().item() if len(steps) > 1 else 0.0
 
         train_time = int(time.time() - self.start_time)
         value_tuple = [v for v in logging_tuple if isinstance(v, (int, float))]

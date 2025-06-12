@@ -1,0 +1,35 @@
+Metadata-Version: 2.2
+Name: ElegantRL
+Version: 0.3.10
+Summary: Lightweight, Efficient and Stable DRL Implementation Using PyTorch
+Home-page: https://github.com/AI4Finance-Foundation/ElegantRL
+Author: AI4Finance Foundation
+Author-email: contact@ai4finance.org
+License: Apache 2.0
+Keywords: Deep Reinforcement Learning
+Classifier: License :: OSI Approved :: Apache Software License
+Classifier: Programming Language :: Python
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 3.6
+Classifier: Programming Language :: Python :: 3.7
+Classifier: Programming Language :: Python :: 3.8
+Classifier: Programming Language :: Python :: 3.9
+Classifier: Programming Language :: Python :: 3.10
+Classifier: Programming Language :: Python :: 3.11
+Classifier: Programming Language :: Python :: Implementation :: CPython
+Classifier: Programming Language :: Python :: Implementation :: PyPy
+Requires-Python: >=3.6
+License-File: LICENSE
+Requires-Dist: th
+Requires-Dist: numpy
+Requires-Dist: gymnasium
+Requires-Dist: matplotlib
+Dynamic: author
+Dynamic: author-email
+Dynamic: classifier
+Dynamic: home-page
+Dynamic: keywords
+Dynamic: license
+Dynamic: requires-dist
+Dynamic: requires-python
+Dynamic: summary
