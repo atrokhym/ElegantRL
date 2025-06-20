@@ -112,7 +112,8 @@ class AgentBase:
                 ary_state, info_dict = env.reset()
             state = th.as_tensor(ary_state, dtype=th.float32, device=self.device).unsqueeze(0)
 
-            rewards[t] = reward
+            # CRITICAL FIX: Convert reward to Python float to prevent numpy.float32 → torch.FloatTensor error
+            rewards[t] = float(reward)
             terminals[t] = terminal
             truncates[t] = truncate
 
@@ -159,7 +160,8 @@ class AgentBase:
 
             state, reward, terminal, truncate, _ = env.step(action)
 
-            rewards[t] = reward
+            # CRITICAL FIX: Convert reward to Python float to prevent numpy.float32 → torch.FloatTensor error
+            rewards[t] = float(reward)
             terminals[t] = terminal
             truncates[t] = truncate
 
