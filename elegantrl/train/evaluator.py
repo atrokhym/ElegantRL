@@ -94,9 +94,23 @@ class Evaluator:
         '''print some information to Terminal'''
         prev_max_r = self.max_r
         self.max_r = max(self.max_r, avg_r)  # update max average cumulative rewards
-        print(f"{self.agent_id:<3}{self.total_step:8.2e}{train_time:8.0f} |"
-              f"{avg_r:8.2f}{std_r:7.1f}{avg_s:7.0f}{std_s:6.0f} |"
-              f"{exp_r:8.2f}{''.join(f'{n:7.2f}' for n in value_tuple)} {logging_str}", flush=True)
+        formatted_metrics = ' '.join(f"{float(metric):>12.4g}" for metric in value_tuple)
+        if isinstance(logging_str, np.ndarray):
+            logging_str = np.array2string(logging_str, separator=' ', max_line_width=60)
+        elif not isinstance(logging_str, str):
+            logging_str = str(logging_str)
+        suffix_parts = []
+        if formatted_metrics:
+            suffix_parts.append(formatted_metrics)
+        if logging_str:
+            suffix_parts.append(logging_str)
+        suffix = f" | {' '.join(suffix_parts)}" if suffix_parts else ''
+        print(
+            f"{self.agent_id:<3}{self.total_step:8.2e}{train_time:8.0f} |"
+            f"{avg_r:8.2f}{std_r:7.1f}{avg_s:7.0f}{std_s:6.0f} |"
+            f"{exp_r:8.2f}{suffix}",
+            flush=True,
+        )
 
         if_save = avg_r > prev_max_r
         if if_save:
