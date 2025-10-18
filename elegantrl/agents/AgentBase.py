@@ -296,7 +296,7 @@ class AgentBase:
             if if_save:
                 th.save(getattr(self, attr_name), file_path)
             elif os.path.isfile(file_path):
-                setattr(self, attr_name, th.load(file_path, map_location=self.device))
+                setattr(self, attr_name, th.load(file_path, map_location=self.device, weights_only=False))
 
 
 def get_optim_param(optimizer: th.optim) -> list:  # backup
