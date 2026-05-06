@@ -23,7 +23,7 @@ if os.name == 'nt':  # if is WindowOS (Windows NT)
 
 
 def train_agent(args: Config, if_single_process: bool = False):
-    if if_single_process:
+    if if_single_process or args.num_workers <= 1:
         print(f"| train_agent_single_process() with GPU_ID {args.gpu_id}", flush=True)
         train_agent_single_process(args)
     elif len(args.learner_gpu_ids) == 0:
